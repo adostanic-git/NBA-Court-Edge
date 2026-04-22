@@ -23,11 +23,13 @@ live_service = LiveStatsService()
 
 @router.get("/games/today")
 async def get_todays_games():
-    """Today's NBA games."""
+    """Today's NBA games — merges NBA API + Odds API so future games always appear."""
     try:
         games = await nba_service.get_todays_games()
         odds_games = await odds_service.get_todays_games_with_odds()
         enriched = []
+        seen_teams = set()
+
         for game in games:
             if "error" in game:
                 continue
@@ -40,6 +42,32 @@ async def get_todays_games():
                     event_id = og.get("event_id")
                     break
             enriched.append({**game, "event_id": event_id})
+            seen_teams.add(home.lower())
+            seen_teams.add(away.lower())
+
+        # Dodaj utakmice iz Odds API-ja koje NBA API još nije vratio
+        for og in odds_games:
+            odds_home = og.get("home_team", "")
+            odds_away = og.get("away_team", "")
+            short_home = odds_home.split()[-1] if odds_home else ""
+            short_away = odds_away.split()[-1] if odds_away else ""
+            if short_home.lower() in seen_teams or short_away.lower() in seen_teams:
+                continue
+            sr_time = _utc_to_sr_time(og.get("commence_time", ""))
+            enriched.append({
+                "game_id": og.get("event_id"),
+                "event_id": og.get("event_id"),
+                "home_team": short_home,
+                "home_city": " ".join(odds_home.split()[:-1]),
+                "away_team": short_away,
+                "away_city": " ".join(odds_away.split()[:-1]),
+                "status": sr_time or "Zakazano",
+                "game_time": og.get("commence_time"),
+                "sr_time": sr_time,
+                "is_live": False,
+                "is_final": False,
+            })
+
         return {"games": enriched, "count": len(enriched)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -213,11 +241,81 @@ async def quick_tips(player_name: str, opponent: Optional[str] = None, last_n_ga
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _utc_to_sr_time(utc_str: str) -> str:
+    """Konvertuje UTC ISO string u srpsko vreme HH:MM."""
+    if not utc_str:
+        return None
+    try:
+        from datetime import datetime, timedelta
+        dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+        try:
+            from zoneinfo import ZoneInfo
+            dt_sr = dt.astimezone(ZoneInfo("Europe/Belgrade"))
+        except ImportError:
+            dt_sr = dt + timedelta(hours=2)
+        return dt_sr.strftime("%H:%M")
+    except Exception:
+        return None
+
+
+def _team_name_match(odds_full: str, nba_city: str, nba_name: str) -> bool:
+    """Proverava da li odds puni naziv odgovara NBA timu."""
+    if not odds_full:
+        return False
+    odds_lower = odds_full.lower()
+    if nba_name and nba_name.lower() in odds_lower:
+        return True
+    if nba_city and nba_city.lower() in odds_lower:
+        return True
+    return False
+
+
 @router.get("/games/live")
 async def get_live_games():
-    """Live rezultati + raspored sa srpskim vremenom."""
+    """Live rezultati + raspored sa srpskim vremenom. Merges NBA live + Odds API scheduled."""
     try:
         games = await live_service.get_live_games()
+
+        # Dodaj buduće utakmice iz Odds API-ja koje NBA scoreboard još nema
+        try:
+            odds_games = await odds_service.get_todays_games_with_odds()
+            for og in odds_games:
+                odds_home = og.get("home_team", "")
+                odds_away = og.get("away_team", "")
+                # Preskoci ako već postoji u NBA podacima
+                already_in = any(
+                    _team_name_match(odds_home, g.get("home_city", ""), g.get("home_team", "")) or
+                    _team_name_match(odds_away, g.get("away_city", ""), g.get("away_team", ""))
+                    for g in games if not g.get("error")
+                )
+                if already_in:
+                    continue
+                # Izvuci kratko ime tima (zadnja reč)
+                def short(name):
+                    return name.split()[-1] if name else ""
+                sr_time = _utc_to_sr_time(og.get("commence_time", ""))
+                games.append({
+                    "game_id": og.get("event_id"),
+                    "home_team": short(odds_home),
+                    "home_city": " ".join(odds_home.split()[:-1]) if odds_home else "",
+                    "home_abbr": short(odds_home)[:3].upper(),
+                    "away_team": short(odds_away),
+                    "away_city": " ".join(odds_away.split()[:-1]) if odds_away else "",
+                    "away_abbr": short(odds_away)[:3].upper(),
+                    "home_score": 0,
+                    "away_score": 0,
+                    "status": sr_time or "Zakazano",
+                    "game_status": 1,
+                    "period": 0,
+                    "game_clock": "",
+                    "game_time_utc": og.get("commence_time", ""),
+                    "sr_time": sr_time,
+                    "is_live": False,
+                    "is_final": False,
+                })
+        except Exception:
+            pass  # Odds API nije dostupan — prikaži samo NBA podatke
+
         live = [g for g in games if g.get("is_live")]
         scheduled = [g for g in games if not g.get("is_live") and not g.get("is_final")]
         final = [g for g in games if g.get("is_final")]
@@ -277,11 +375,12 @@ async def check_tip_result(
     player_name: str,
     prop_type: str,
     line: float,
-    game_date: str
+    game_date: str,
+    recommendation: str = "OVER",
 ):
-    """Proverava da li je tip pogođen na osnovu game loga."""
+    """Proverava da li je tip pogođen na osnovu game loga (uzima u obzir OVER/UNDER smer)."""
     try:
-        result = await live_service.check_tip_result(player_name, prop_type, line, game_date)
+        result = await live_service.check_tip_result(player_name, prop_type, line, game_date, recommendation)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

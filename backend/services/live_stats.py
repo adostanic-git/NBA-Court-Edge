@@ -50,24 +50,29 @@ class LiveStatsService:
         return await loop.run_in_executor(None, self._fetch_live_games)
 
     def _fetch_live_games(self) -> List[Dict]:
+        """
+        Strategija: ScoreboardV3 sa eksplicitnim ET datumom je PRIMARNI izvor
+        (uvek vraca sve danasnje meceve ukljucujuci buduce).
+        Live ScoreBoard se koristi samo za overlay realtime statusa/rezultata.
+        """
+        import time as _time
+
+        # ── Korak 1: Primarni izvor — ScoreboardV3 sa tacnim ET datumom ──────
+        games_by_id = {}
         try:
-            from nba_api.live.nba.endpoints import scoreboard
-            board = scoreboard.ScoreBoard()
-            data = board.get_dict()
-            games = []
-
-            for game in data.get("scoreboard", {}).get("games", []):
-                status = game.get("gameStatusText", "")
-                game_status = game.get("gameStatus", 1)  # 1=scheduled, 2=live, 3=final
-
+            from nba_api.stats.endpoints import scoreboardv3
+            et_date = self._today_et()
+            _time.sleep(0.4)
+            board = scoreboardv3.ScoreboardV3(game_date=et_date, league_id="00")
+            raw = board.get_dict().get("scoreboard", {}).get("games", [])
+            for game in raw:
+                gid = game.get("gameId", "")
                 home = game.get("homeTeam", {})
                 away = game.get("awayTeam", {})
-
-                game_time_utc = game.get("gameTimeUTC") or game.get("gameEt")
-                sr_time = self._utc_to_sr(game_time_utc)
-
-                games.append({
-                    "game_id": game.get("gameId"),
+                game_time_utc = game.get("gameTimeUTC", "")
+                game_status = game.get("gameStatus", 1)
+                games_by_id[gid] = {
+                    "game_id": gid,
                     "home_team": home.get("teamName", ""),
                     "home_city": home.get("teamCity", ""),
                     "home_abbr": home.get("teamTricode", ""),
@@ -76,27 +81,87 @@ class LiveStatsService:
                     "away_city": away.get("teamCity", ""),
                     "away_abbr": away.get("teamTricode", ""),
                     "away_score": away.get("score", 0),
-                    "status": status,
+                    "status": game.get("gameStatusText", ""),
                     "game_status": game_status,
                     "period": game.get("period", 0),
                     "game_clock": game.get("gameClock", ""),
                     "game_time_utc": game_time_utc,
-                    "sr_time": sr_time,
+                    "sr_time": self._utc_to_sr(game_time_utc),
                     "is_live": game_status == 2,
                     "is_final": game_status == 3,
-                })
-
-            # Ako live endpoint ne vidi mečeve (još nisu počeli) — fallback na ScoreboardV3
-            if not games:
-                games = self._fetch_scheduled_games_fallback()
-
-            return games
+                }
         except Exception as e:
-            # Ako live endpoint potpuno pukne, probaj fallback
-            try:
-                return self._fetch_scheduled_games_fallback()
-            except Exception:
-                return [{"error": str(e)}]
+            print(f"[LiveGames] ScoreboardV3 greška: {e}")
+
+        # ── Korak 2: Live overlay — ažuriraj score/status za mečeve u toku ──
+        try:
+            from nba_api.live.nba.endpoints import scoreboard as live_sb
+            _time.sleep(0.3)
+            live_data = live_sb.ScoreBoard().get_dict()
+            for game in live_data.get("scoreboard", {}).get("games", []):
+                gid = game.get("gameId", "")
+                game_status = game.get("gameStatus", 1)
+                home = game.get("homeTeam", {})
+                away = game.get("awayTeam", {})
+                game_time_utc = game.get("gameTimeUTC") or game.get("gameEt", "")
+
+                if gid in games_by_id:
+                    # Ažuriraj postojeći meč iz primarnog izvora
+                    games_by_id[gid].update({
+                        "home_score": home.get("score", games_by_id[gid]["home_score"]),
+                        "away_score": away.get("score", games_by_id[gid]["away_score"]),
+                        "game_status": game_status,
+                        "period": game.get("period", games_by_id[gid]["period"]),
+                        "game_clock": game.get("gameClock", ""),
+                        "status": game.get("gameStatusText", games_by_id[gid]["status"]),
+                        "is_live": game_status == 2,
+                        "is_final": game_status == 3,
+                    })
+                else:
+                    # Meč u live endpointu koji nije u ScoreboardV3 — dodaj ga
+                    sr_time = self._utc_to_sr(game_time_utc)
+                    games_by_id[gid] = {
+                        "game_id": gid,
+                        "home_team": home.get("teamName", ""),
+                        "home_city": home.get("teamCity", ""),
+                        "home_abbr": home.get("teamTricode", ""),
+                        "home_score": home.get("score", 0),
+                        "away_team": away.get("teamName", ""),
+                        "away_city": away.get("teamCity", ""),
+                        "away_abbr": away.get("teamTricode", ""),
+                        "away_score": away.get("score", 0),
+                        "status": game.get("gameStatusText", ""),
+                        "game_status": game_status,
+                        "period": game.get("period", 0),
+                        "game_clock": game.get("gameClock", ""),
+                        "game_time_utc": game_time_utc,
+                        "sr_time": sr_time,
+                        "is_live": game_status == 2,
+                        "is_final": game_status == 3,
+                    }
+        except Exception as e:
+            print(f"[LiveGames] Live overlay greška: {e}")
+
+        games = list(games_by_id.values())
+
+        # Sortuj: live → scheduled → final
+        def sort_key(g):
+            if g.get("is_live"):     return 0
+            if not g.get("is_final"): return 1
+            return 2
+
+        games.sort(key=sort_key)
+        return games if games else [{"error": "Nema podataka o mečevima"}]
+
+    def _today_et(self) -> str:
+        """Vraća danas datum u US Eastern Time formatu MM/DD/YYYY."""
+        try:
+            from zoneinfo import ZoneInfo
+            et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            from datetime import timezone, timedelta
+            et = datetime.now(timezone(timedelta(hours=-4)))
+        return et.strftime("%m/%d/%Y")
 
     def _utc_to_sr(self, game_time_utc: str) -> str:
         """Konvertuje UTC ISO string u srpsko lokalno vreme (HH:MM)."""
@@ -113,51 +178,6 @@ class LiveStatsService:
             return dt_sr.strftime("%H:%M")
         except Exception:
             return None
-
-    def _fetch_scheduled_games_fallback(self) -> List[Dict]:
-        """
-        Fallback kada live ScoreBoard ne vidi mečeve (pre početka).
-        Koristi ScoreboardV3 kao nba_stats.py — vraća mečeve u formatu koji UI očekuje.
-        """
-        from nba_api.stats.endpoints import scoreboardv3
-        import time as _time
-
-        today = datetime.now().strftime("%m/%d/%Y")
-        _time.sleep(0.6)
-
-        board = scoreboardv3.ScoreboardV3(game_date=today, league_id="00")
-        data = board.get_dict()
-        raw_games = data.get("scoreboard", {}).get("games", [])
-
-        games = []
-        for game in raw_games:
-            status = game.get("gameStatusText", "")
-            game_status = game.get("gameStatus", 1)
-            home = game.get("homeTeam", {})
-            away = game.get("awayTeam", {})
-            game_time_utc = game.get("gameTimeUTC", "")
-            sr_time = self._utc_to_sr(game_time_utc)
-
-            games.append({
-                "game_id": game.get("gameId", ""),
-                "home_team": home.get("teamName", ""),
-                "home_city": home.get("teamCity", ""),
-                "home_abbr": home.get("teamTricode", ""),
-                "home_score": home.get("score", 0),
-                "away_team": away.get("teamName", ""),
-                "away_city": away.get("teamCity", ""),
-                "away_abbr": away.get("teamTricode", ""),
-                "away_score": away.get("score", 0),
-                "status": status,
-                "game_status": game_status,
-                "period": game.get("period", 0),
-                "game_clock": game.get("gameClock", ""),
-                "game_time_utc": game_time_utc,
-                "sr_time": sr_time,
-                "is_live": game_status == 2,
-                "is_final": game_status == 3,
-            })
-        return games
 
     async def get_player_live_stats(self, player_name: str) -> Optional[Dict]:
         """Vraća live stats igrača ako mu je meč u toku."""
@@ -221,15 +241,16 @@ class LiveStatsService:
         except Exception as e:
             return {"error": str(e), "is_live": False}
 
-    async def check_tip_result(self, player_name: str, prop_type: str, line: float, game_date: str) -> Dict:
+    async def check_tip_result(self, player_name: str, prop_type: str, line: float, game_date: str, recommendation: str = "OVER") -> Dict:
         """
         Proverava da li je tip pogođen gledajući game log igrača.
         Vraća: hit=True/False/None (None = meč nije odigran ili ne može da nađe)
+        hit=True znači da je TIP pogođen (uzima u obzir OVER/UNDER smer).
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._check_result, player_name, prop_type, line, game_date)
+        return await loop.run_in_executor(None, self._check_result, player_name, prop_type, line, game_date, recommendation)
 
-    def _check_result(self, player_name: str, prop_type: str, line: float, game_date: str) -> Dict:
+    def _check_result(self, player_name: str, prop_type: str, line: float, game_date: str, recommendation: str = "OVER") -> Dict:
         try:
             from nba_api.stats.static import players
             from nba_api.stats.endpoints import playergamelog
@@ -238,27 +259,7 @@ class LiveStatsService:
             import unicodedata
 
             def _norm(s: str) -> str:
-                """Ukloni dijakritike za poređenje — npr. Jokić → Jokic."""
                 return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").lower()
-
-            norm_query = _norm(player_name)
-            all_players = players.get_players()
-            player = next((p for p in all_players if _norm(p["full_name"]) == norm_query), None)
-            if not player:
-                player = next((p for p in all_players if norm_query in _norm(p["full_name"])), None)
-            if not player:
-                return {"hit": None, "reason": "Igrač nije pronađen"}
-
-            now = datetime.now()
-            season_year = now.year if now.month >= 10 else now.year - 1
-            season = f"{season_year}-{str(season_year + 1)[-2:]}"
-            target = datetime.strptime(game_date, "%Y-%m-%d")
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            stat_map = {"points": "PTS", "rebounds": "REB", "assists": "AST", "pra": None}
-
-            # Ako je meč danas ili u budućnosti, ne gledaj game log — utakmica još nije odigrana
-            if target.date() >= today.date():
-                return {"hit": None, "reason": "Utakmica se tek igra večeras"}
 
             def _parse_date(raw: str):
                 raw = raw.strip()
@@ -269,36 +270,54 @@ class LiveStatsService:
                         continue
                 return None
 
-            def _search_df(df):
-                """Pretraži DataFrame game loga za ciljni datum (tolerancija ±3 dana)."""
-                for _, row in df.iterrows():
-                    row_date = _parse_date(str(row.get("GAME_DATE", "")))
-                    if row_date is None:
-                        continue
-                    diff = (row_date - target).days
-                    # ±3 dana: pokriva timezone pomake, kasno čuvanje tipova,
-                    # i slučajeve gdje je tip sačuvan 1-2 dana nakon odigranog meča
-                    if abs(diff) > 3:
-                        continue
-                    if row_date.date() > today.date():
-                        continue
-                    if prop_type == "pra":
-                        actual = float(row.get("PTS", 0)) + float(row.get("REB", 0)) + float(row.get("AST", 0))
-                    else:
-                        col = stat_map.get(prop_type, "PTS")
-                        actual = float(row.get(col, 0))
-                    return {
-                        "hit": actual > line,
-                        "actual": actual,
-                        "line": line,
-                        "prop_type": prop_type,
-                        "game_date": str(row["GAME_DATE"]),
-                        "matchup": str(row.get("MATCHUP", "")),
-                    }
-                return None
+            def _row_to_result(row, matched_date):
+                if prop_type == "pra":
+                    actual = float(row.get("PTS", 0)) + float(row.get("REB", 0)) + float(row.get("AST", 0))
+                else:
+                    col = {"points": "PTS", "rebounds": "REB", "assists": "AST"}.get(prop_type, "PTS")
+                    actual = float(row.get(col, 0))
+                # OVER: pogođeno ako je actual > line; UNDER: pogođeno ako je actual < line
+                if recommendation.upper() == "UNDER":
+                    hit = actual < line
+                else:
+                    hit = actual > line
+                return {
+                    "hit": hit,
+                    "actual": actual,
+                    "line": line,
+                    "prop_type": prop_type,
+                    "game_date": str(row.get("GAME_DATE", "")),
+                    "matchup": str(row.get("MATCHUP", "")),
+                }
 
-            # Probaj sve relevantne tipove sezone — April je play-in/playoff period
+            norm_query = _norm(player_name)
+            all_players = players.get_players()
+            player = next((p for p in all_players if _norm(p["full_name"]) == norm_query), None)
+            if not player:
+                player = next((p for p in all_players if norm_query in _norm(p["full_name"])), None)
+            if not player:
+                # Pokušaj i sa parcijalnim poklapanjem prezimena
+                parts = norm_query.split()
+                if parts:
+                    player = next((p for p in all_players if parts[-1] in _norm(p["full_name"])), None)
+            if not player:
+                return {"hit": None, "reason": "Igrač nije pronađen u NBA bazi"}
+
+            now = datetime.now()
+            season_year = now.year if now.month >= 10 else now.year - 1
+            season = f"{season_year}-{str(season_year + 1)[-2:]}"
+            target = datetime.strptime(game_date, "%Y-%m-%d")
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+            if target.date() >= today.date():
+                return {"hit": None, "reason": "Utakmica se tek igra večeras"}
+
             season_types = ["Regular Season", "Playoffs", "PlayIn"]
+
+            # Prva runda: nađi meč NAJBLIŽI ciljnom datumu u ±7 dana prozoru
+            all_dfs = []
+            best_row_r1 = None
+            best_diff_r1 = 999
             for stype in season_types:
                 try:
                     time.sleep(0.4)
@@ -309,15 +328,64 @@ class LiveStatsService:
                     df = gamelog.get_data_frames()[0]
                     if df.empty:
                         continue
-                    result = _search_df(df)
-                    if result is not None:
-                        return result
+                    all_dfs.append(df)
+                    for _, row in df.iterrows():
+                        row_date = _parse_date(str(row.get("GAME_DATE", "")))
+                        if row_date is None or row_date.date() > today.date():
+                            continue
+                        diff = abs((row_date - target).days)
+                        if diff <= 7 and diff < best_diff_r1:
+                            best_diff_r1 = diff
+                            best_row_r1 = row
                 except Exception:
                     continue
+            if best_row_r1 is not None:
+                return _row_to_result(best_row_r1, None)
 
-            # Meč nije nađen ni u jednom tipu sezone
-            if target.date() >= today.date():
-                return {"hit": None, "reason": "Utakmica se tek igra večeras"}
-            return {"hit": None, "reason": f"Meč na datum {game_date} nije pronađen u game logu"}
+            # Ako nije nađeno u ±7 dana — probaj prethodnu sezonu
+            if not all_dfs:
+                prev_season = f"{season_year - 1}-{str(season_year)[-2:]}"
+                for stype in ["Regular Season", "Playoffs", "PlayIn"]:
+                    try:
+                        time.sleep(0.4)
+                        gamelog = playergamelog.PlayerGameLog(
+                            player_id=player["id"], season=prev_season,
+                            season_type_all_star=stype
+                        )
+                        df = gamelog.get_data_frames()[0]
+                        if df.empty:
+                            continue
+                        all_dfs.append(df)
+                        for _, row in df.iterrows():
+                            row_date = _parse_date(str(row.get("GAME_DATE", "")))
+                            if row_date is None or row_date.date() > today.date():
+                                continue
+                            if abs((row_date - target).days) <= 7:
+                                return _row_to_result(row, row_date)
+                    except Exception:
+                        continue
+
+            if not all_dfs:
+                return {"hit": None, "reason": "Nije moguće dohvatiti game log (API greška)"}
+
+            # Druga runda: nađi najbliži meč u celom game logu (do 30 dana)
+            best_row = None
+            best_diff = 999
+            for df in all_dfs:
+                for _, row in df.iterrows():
+                    row_date = _parse_date(str(row.get("GAME_DATE", "")))
+                    if row_date is None or row_date.date() > today.date():
+                        continue
+                    diff = abs((row_date - target).days)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_row = row
+
+            if best_row is not None and best_diff <= 30:
+                return _row_to_result(best_row, None)
+
+            # Igrač ima game log ali nijedan meč nije blizu ciljnog datuma
+            return {"hit": None, "reason": "Igrač nije igrao u tom periodu (povreda/odmor)"}
+
         except Exception as e:
-            return {"hit": None, "reason": str(e)}
+            return {"hit": None, "reason": f"Greška: {str(e)}"}

@@ -130,12 +130,20 @@ function HitMiss({ tip, sessionResult }) {
 
   if (result.hit === null || result.hit === undefined) {
     const reason = result.reason || ''
-    const display = reason.toLowerCase().includes('igrač') && reason.includes('nije pronađen')
-      ? '❓ Nije pronađen'
-      : reason.includes('večeras') || reason.includes('tek igra')
-      ? '🕐 Večeras'
-      : '📅 Nije odigrano'
-    return <span style={{ fontSize: 10, color: reason.includes('večeras') || reason.includes('tek igra') ? '#ff9500' : T.textDim }}>{display}</span>
+    const r = reason.toLowerCase()
+    let display, color
+    if (r.includes('večeras') || r.includes('tek igra')) {
+      display = '🕐 Večeras'; color = '#ff9500'
+    } else if (r.includes('nije pronađen u nba')) {
+      display = '❓ Igrač nepoznat'; color = T.textDim
+    } else if (r.includes('povreda') || r.includes('odmor') || r.includes('nije igrao')) {
+      display = '🤕 Nije igrao'; color = T.textDim
+    } else if (r.includes('api greška') || r.includes('greška:')) {
+      display = '⚠️ Greška API'; color = '#ff9500'
+    } else {
+      display = '📅 Nije odigrano'; color = T.textDim
+    }
+    return <span style={{ fontSize: 10, color }}>{display}</span>
   }
 
   return (
@@ -159,7 +167,7 @@ function HitMiss({ tip, sessionResult }) {
 }
 
 // ─── Tip row ──────────────────────────────────────────────────────────────────
-function TipRow({ tip, sessionResult }) {
+function TipRow({ tip, sessionResult, onReCheck }) {
   const [expanded, setExpanded] = useState(false)
   const T = useT()
   const color   = REC_COLOR[tip.recommendation] || T.text3
@@ -204,8 +212,22 @@ function TipRow({ tip, sessionResult }) {
           </div>
         </div>
 
-        <div style={{ flexShrink: 0 }}>
+        <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
           <HitMiss tip={tip} sessionResult={sessionResult} />
+          {tip.recommendation !== 'SKIP' && sessionResult !== 'checking' && (
+            <button
+              onClick={e => { e.stopPropagation(); onReCheck(tip) }}
+              title="Ponovo proveri rezultat"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontSize: 13, color: T.textVdim, padding: '2px 4px',
+                borderRadius: 4, lineHeight: 1,
+                transition: 'color 0.15s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = T.text3}
+              onMouseLeave={e => e.currentTarget.style.color = T.textVdim}
+            >↺</button>
+          )}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0 }}>
@@ -306,6 +328,39 @@ function StatsCard({ hits, misses, total, overCount, underCount, checking }) {
   )
 }
 
+// ─── Null-result cache (localStorage) ────────────────────────────────────────
+// v2: bump verzije da se invalidiraju stari loši rezultati
+const NULL_CACHE_KEY = 'ce_null_checks_v2'
+
+function getNullCache() {
+  try { return JSON.parse(localStorage.getItem(NULL_CACHE_KEY) || '{}') } catch { return {} }
+}
+
+function setNullCache(cache) {
+  try { localStorage.setItem(NULL_CACHE_KEY, JSON.stringify(cache)) } catch {}
+}
+
+function isRecentlyChecked(tipId, gameDate) {
+  const cache = getNullCache()
+  const entry = cache[tipId]
+  if (!entry) return false
+  const today = new Date().toISOString().split('T')[0]
+  // Today's games: re-check after 1h (game might finish); past games: re-check after 6h
+  const ttl = gameDate === today ? 60 * 60 * 1000 : 6 * 60 * 60 * 1000
+  return Date.now() - entry.ts < ttl
+}
+
+function markNullChecked(tipId, result) {
+  const cache = getNullCache()
+  cache[tipId] = { ts: Date.now(), ...result }
+  setNullCache(cache)
+}
+
+function getCachedNullResult(tipId) {
+  const cache = getNullCache()
+  return cache[tipId] || null
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function History() {
   const [history, setHistory]         = useState([])
@@ -338,13 +393,29 @@ export default function History() {
     const unchecked = tips.filter(t => t.recommendation !== 'SKIP' && t.result === null)
     if (!unchecked.length) return
 
+    // Restore cached null results immediately (no spinner for these)
+    const cached = {}
+    unchecked.forEach(t => {
+      const gameDate = t.game_date || t.created_at?.split('T')[0]
+      if (isRecentlyChecked(t.id, gameDate)) {
+        cached[t.id] = getCachedNullResult(t.id)
+      }
+    })
+    if (Object.keys(cached).length) setCheckResults(cached)
+
+    const toFetch = unchecked.filter(t => {
+      const gameDate = t.game_date || t.created_at?.split('T')[0]
+      return !isRecentlyChecked(t.id, gameDate)
+    })
+    if (!toFetch.length) return
+
     const initialChecking = {}
-    unchecked.forEach(t => { initialChecking[t.id] = 'checking' })
-    setCheckResults(initialChecking)
+    toFetch.forEach(t => { initialChecking[t.id] = 'checking' })
+    setCheckResults(prev => ({ ...prev, ...initialChecking }))
 
     const BATCH = 3
-    for (let i = 0; i < unchecked.length; i += BATCH) {
-      const batch = unchecked.slice(i, i + BATCH)
+    for (let i = 0; i < toFetch.length; i += BATCH) {
+      const batch = toFetch.slice(i, i + BATCH)
       const settled = await Promise.allSettled(batch.map(doCheck))
       const updates = {}
       settled.forEach((s, idx) => {
@@ -352,25 +423,52 @@ export default function History() {
           ? s.value : { hit: null, reason: 'Greška' }
       })
       setCheckResults(prev => ({ ...prev, ...updates }))
-      if (i + BATCH < unchecked.length) await new Promise(res => setTimeout(res, 500))
+      if (i + BATCH < toFetch.length) await new Promise(res => setTimeout(res, 500))
     }
   }
 
-  async function doCheck(tip) {
+  async function doCheck(tip, forceRecheck = false) {
     const gameDate = tip.game_date || tip.created_at?.split('T')[0]
     if (!gameDate) return { hit: null, reason: 'Nema datuma' }
     try {
-      const url = `${API}/api/tips/check?player_name=${encodeURIComponent(tip.player_name)}&prop_type=${tip.prop_type}&line=${tip.line}&game_date=${gameDate}`
+      const rec = tip.recommendation || 'OVER'
+      const url = `${API}/api/tips/check?player_name=${encodeURIComponent(tip.player_name)}&prop_type=${tip.prop_type}&line=${tip.line}&game_date=${gameDate}&recommendation=${rec}`
       const r = await fetch(url, { headers: authHeader() })
       const d = await r.json()
       if (d.hit === true || d.hit === false) {
+        // Definitivni rezultat — sačuvaj u bazu, ukloni iz null keša
         fetch(`${API}/api/auth/history/result`, {
           method: 'POST', headers: authHeader(true),
           body: JSON.stringify({ tip_id: tip.id, hit: d.hit, actual: d.actual ?? null })
         }).catch(() => {})
+        const cache = getNullCache()
+        delete cache[tip.id]
+        setNullCache(cache)
+        // Ažuriraj lokalni history state odmah
+        setHistory(prev => prev.map(t =>
+          t.id === tip.id ? { ...t, result: d.hit ? 1 : 0, actual_value: d.actual ?? null } : t
+        ))
+      } else {
+        markNullChecked(tip.id, d)
       }
       return d
     } catch { return { hit: null, reason: 'Greška' } }
+  }
+
+  async function reCheckTip(tip) {
+    // Reset rezultata u bazi, pa ponovo proveri
+    await fetch(`${API}/api/auth/history/result`, {
+      method: 'POST', headers: authHeader(true),
+      body: JSON.stringify({ tip_id: tip.id, hit: null, actual: null, reset: true })
+    }).catch(() => {})
+    // Ukloni iz null keša i iz history state-a
+    const cache = getNullCache()
+    delete cache[tip.id]
+    setNullCache(cache)
+    setHistory(prev => prev.map(t => t.id === tip.id ? { ...t, result: null, actual_value: null } : t))
+    setCheckResults(prev => ({ ...prev, [tip.id]: 'checking' }))
+    const result = await doCheck(tip, true)
+    setCheckResults(prev => ({ ...prev, [tip.id]: result }))
   }
 
   function getTipHit(tip) {
@@ -471,7 +569,7 @@ export default function History() {
               <div style={{ fontSize: 10, color: T.textVdim }}>{groups[date].length} tipova</div>
             </div>
             {groups[date].map(tip => (
-              <TipRow key={tip.id} tip={tip} sessionResult={checkResults[tip.id]} />
+              <TipRow key={tip.id} tip={tip} sessionResult={checkResults[tip.id]} onReCheck={reCheckTip} />
             ))}
           </div>
         ))}

@@ -211,19 +211,28 @@ async def get_history(cu=Depends(get_current_user)):
 
 @router.post("/history/result")
 async def save_tip_result(payload: dict, cu=Depends(get_current_user)):
-    """Sačuvaj rezultat tipa (hit/miss) u bazu da se ne proverava svaki put."""
+    """Sačuvaj ili resetuj rezultat tipa (hit/miss) u bazu."""
     tip_id = payload.get("tip_id")
-    hit = payload.get("hit")       # True/False
-    actual = payload.get("actual") # stvarna vrednost stats
-    if tip_id is None or hit is None:
-        raise HTTPException(400, "tip_id i hit su obavezni")
+    hit = payload.get("hit")
+    actual = payload.get("actual")
+    reset = payload.get("reset", False)
+    if tip_id is None:
+        raise HTTPException(400, "tip_id je obavezan")
     conn = get_db()
     from datetime import datetime
-    conn.execute(
-        """UPDATE tip_history SET result=?, actual_value=?, result_checked_at=?
-           WHERE id=? AND user_id=?""",
-        (1 if hit else 0, actual, datetime.now().isoformat(), tip_id, cu["id"])
-    )
+    if reset:
+        conn.execute(
+            "UPDATE tip_history SET result=NULL, actual_value=NULL, result_checked_at=NULL WHERE id=? AND user_id=?",
+            (tip_id, cu["id"])
+        )
+    else:
+        if hit is None:
+            raise HTTPException(400, "hit je obavezan")
+        conn.execute(
+            """UPDATE tip_history SET result=?, actual_value=?, result_checked_at=?
+               WHERE id=? AND user_id=?""",
+            (1 if hit else 0, actual, datetime.now().isoformat(), tip_id, cu["id"])
+        )
     conn.commit()
     conn.close()
     return {"saved": True}
