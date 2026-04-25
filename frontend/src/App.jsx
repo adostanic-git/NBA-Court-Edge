@@ -7,7 +7,7 @@ import History     from './pages/History'
 import Account     from './pages/Account'
 import Navbar      from './components/Navbar'
 
-export const API = 'http://localhost:8000'
+export const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 // ── Auth context ──────────────────────────────────────────────────────────────
 export const AuthContext = createContext(null)
