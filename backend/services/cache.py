@@ -14,9 +14,9 @@ async def init_cache():
         url = __import__("os").getenv("REDIS_URL", "redis://localhost:6379")
         r = redis.from_url(url, decode_responses=True)
         await r.ping()
-        print("✅ Redis cache connected")
+        print("[Cache] Redis connected")
     except Exception:
-        print("⚠️  Redis unavailable, using in-memory cache")
+        print("[Cache] Redis unavailable, using in-memory cache")
 
 
 async def cache_get(key: str, ttl_seconds: int = 300) -> Optional[Any]:
