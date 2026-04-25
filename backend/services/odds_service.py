@@ -64,7 +64,15 @@ class OddsAPIService:
                         "dateFormat": "iso",
                     }
                 )
+                if resp.status_code == 401:
+                    body = resp.json()
+                    if body.get("error_code") == "OUT_OF_USAGE_CREDITS":
+                        print("[OddsAPI] GRESKA: API kvota iscrpljena. Registruj novi kljuc na https://the-odds-api.com/")
+                    else:
+                        print(f"[OddsAPI] GRESKA 401: {body.get('message', 'Unauthorized')}")
+                    return []
                 if resp.status_code != 200:
+                    print(f"[OddsAPI] GRESKA {resp.status_code}: {resp.text[:120]}")
                     return []
 
                 games = []

@@ -1104,32 +1104,27 @@ export default function Home() {
     const LS_PICKS = 'ce_picks_v2'
     const LS_DATE  = 'ce_picks_date_v2'
 
-    // 1. Provjeri localStorage — ako su picks iz danas, koristi ih odmah
+    // 1. Prikaži localStorage odmah (nema bljeskanja praznog ekrana)
     try {
       const storedDate = localStorage.getItem(LS_DATE)
       if (storedDate === todayStr) {
         const raw = localStorage.getItem(LS_PICKS)
         if (raw) {
           const cached = JSON.parse(raw)
-          if (cached?.length > 0) {
-            setPicks(cached)
-            return // ne treba API poziv, tipovi su vec tu
-          }
+          if (cached?.length > 0) setPicks(cached)
         }
       } else {
-        // Novi dan — brišemo stare tipove iz localStorage
         localStorage.removeItem(LS_PICKS)
         localStorage.removeItem(LS_DATE)
       }
     } catch {}
 
-    // 2. Nema u localStorage — pitaj API
+    // 2. Uvijek pita server — osvježava ako ima novih/više tipova
     try {
       const r = await fetch(`${API}/api/auth/picks/cached`, { headers: authHeader() })
       const d = await r.json()
       if (d.picks?.length > 0) {
         setPicks(d.picks)
-        // Sačuvaj u localStorage sa oznakom dana
         try {
           localStorage.setItem(LS_PICKS, JSON.stringify(d.picks))
           localStorage.setItem(LS_DATE, todayStr)
