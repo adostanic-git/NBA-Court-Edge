@@ -49,111 +49,61 @@ class NBAStatsService:
             return [{"error": str(e), "message": "Could not fetch today's games"}]
 
     def _fetch_upcoming_games(self) -> List[Dict]:
-        """Fetch next scheduled NBA games using ScoreboardV3."""
+        """Fetch next scheduled NBA games using ScoreboardV2 (available in nba_api 1.5.2)."""
+        TEAM_MAP = {
+            1610612737: ("Hawks", "Atlanta"),       1610612738: ("Celtics", "Boston"),
+            1610612739: ("Cavaliers", "Cleveland"),  1610612740: ("Pelicans", "New Orleans"),
+            1610612741: ("Bulls", "Chicago"),        1610612742: ("Mavericks", "Dallas"),
+            1610612743: ("Nuggets", "Denver"),       1610612744: ("Warriors", "Golden State"),
+            1610612745: ("Rockets", "Houston"),      1610612746: ("Clippers", "LA"),
+            1610612747: ("Lakers", "Los Angeles"),   1610612748: ("Heat", "Miami"),
+            1610612749: ("Bucks", "Milwaukee"),      1610612750: ("Timberwolves", "Minnesota"),
+            1610612751: ("Nets", "Brooklyn"),        1610612752: ("Knicks", "New York"),
+            1610612753: ("Magic", "Orlando"),        1610612754: ("Pacers", "Indiana"),
+            1610612755: ("76ers", "Philadelphia"),   1610612756: ("Suns", "Phoenix"),
+            1610612757: ("Trail Blazers", "Portland"), 1610612758: ("Kings", "Sacramento"),
+            1610612759: ("Spurs", "San Antonio"),   1610612760: ("Thunder", "Oklahoma City"),
+            1610612761: ("Raptors", "Toronto"),     1610612762: ("Jazz", "Utah"),
+            1610612763: ("Grizzlies", "Memphis"),   1610612764: ("Wizards", "Washington"),
+            1610612765: ("Pistons", "Detroit"),     1610612766: ("Hornets", "Charlotte"),
+        }
         try:
-            from nba_api.stats.endpoints import scoreboardv3
+            from nba_api.stats.endpoints import scoreboardv2
             from datetime import datetime, timedelta
             import time
 
-            # Try today first, then next 3 days
             for days_ahead in range(0, 4):
                 date = (datetime.now() + timedelta(days=days_ahead)).strftime("%m/%d/%Y")
                 time.sleep(0.6)
                 try:
-                    board = scoreboardv3.ScoreboardV3(game_date=date, league_id="00")
-                    data = board.get_dict()
-                    game_dates = data.get("scoreboard", {}).get("games", [])
-                    if not game_dates:
-                        # fallback to dataframe
-                        df = board.get_data_frames()[0]
-                        if df.empty:
+                    board = scoreboardv2.ScoreboardV2(game_date=date)
+                    df = board.get_data_frames()[0]
+                    if df.empty:
+                        continue
+                    games = []
+                    for _, row in df.iterrows():
+                        status = str(row.get("GAME_STATUS_TEXT", ""))
+                        if "Final" in status:
                             continue
-                        games = []
-                        for _, row in df.iterrows():
-                            games.append({
-                                "game_id": str(row.get("GAME_ID", "")),
-                                "home_team": str(row.get("HOME_TEAM_NAME", row.get("HOME_TEAM_ABBREVIATION", ""))),
-                                "away_team": str(row.get("AWAY_TEAM_NAME", row.get("VISITOR_TEAM_ABBREVIATION", ""))),
-                                "home_city": str(row.get("HOME_TEAM_CITY", "")),
-                                "away_city": str(row.get("AWAY_TEAM_CITY", "")),
-                                "status": str(row.get("GAME_STATUS_TEXT", f"Scheduled {date}")),
-                                "game_time": date,
-                            })
-                        if games:
-                            return games
-                    else:
-                        games = []
-                        for game in game_dates:
-                            status = game.get("gameStatusText", "")
-                            if "Final" in status:
-                                continue
-                            games.append({
-                                "game_id": game.get("gameId", ""),
-                                "home_team": game.get("homeTeam", {}).get("teamName", ""),
-                                "away_team": game.get("awayTeam", {}).get("teamName", ""),
-                                "home_city": game.get("homeTeam", {}).get("teamCity", ""),
-                                "away_city": game.get("awayTeam", {}).get("teamCity", ""),
-                                "status": status,
-                                "game_time": game.get("gameTimeUTC", date),
-                            })
-                        if games:
-                            return games
+                        home_id = int(row.get("HOME_TEAM_ID", 0))
+                        away_id = int(row.get("VISITOR_TEAM_ID", 0))
+                        home_name, home_city = TEAM_MAP.get(home_id, ("Unknown", ""))
+                        away_name, away_city = TEAM_MAP.get(away_id, ("Unknown", ""))
+                        games.append({
+                            "game_id": str(row.get("GAME_ID", "")),
+                            "home_team": home_name,
+                            "away_team": away_name,
+                            "home_city": home_city,
+                            "away_city": away_city,
+                            "status": status,
+                            "game_time": date,
+                        })
+                    if games:
+                        return games
                 except Exception:
                     continue
 
-            # Last resort: use ScoreboardV2 with team ID mapping
-            return self._fetch_with_scoreboardv2()
-        except Exception:
             return []
-
-    def _fetch_with_scoreboardv2(self) -> List[Dict]:
-        """Fallback using ScoreboardV2 with team ID to name mapping."""
-        TEAM_MAP = {
-            1610612737: ("Hawks", "Atlanta"), 1610612738: ("Celtics", "Boston"),
-            1610612739: ("Cavaliers", "Cleveland"), 1610612740: ("Pelicans", "New Orleans"),
-            1610612741: ("Bulls", "Chicago"), 1610612742: ("Mavericks", "Dallas"),
-            1610612743: ("Nuggets", "Denver"), 1610612744: ("Warriors", "Golden State"),
-            1610612745: ("Rockets", "Houston"), 1610612746: ("Clippers", "LA"),
-            1610612747: ("Lakers", "Los Angeles"), 1610612748: ("Heat", "Miami"),
-            1610612749: ("Bucks", "Milwaukee"), 1610612750: ("Timberwolves", "Minnesota"),
-            1610612751: ("Nets", "Brooklyn"), 1610612752: ("Knicks", "New York"),
-            1610612753: ("Magic", "Orlando"), 1610612754: ("Pacers", "Indiana"),
-            1610612755: ("76ers", "Philadelphia"), 1610612756: ("Suns", "Phoenix"),
-            1610612757: ("Trail Blazers", "Portland"), 1610612758: ("Kings", "Sacramento"),
-            1610612759: ("Spurs", "San Antonio"), 1610612760: ("Thunder", "Oklahoma City"),
-            1610612761: ("Raptors", "Toronto"), 1610612762: ("Jazz", "Utah"),
-            1610612763: ("Grizzlies", "Memphis"), 1610612764: ("Wizards", "Washington"),
-            1610612765: ("Pistons", "Detroit"), 1610612766: ("Hornets", "Charlotte"),
-        }
-        try:
-            from nba_api.stats.endpoints import scoreboardv2
-            from datetime import datetime
-            import time
-            date = datetime.now().strftime("%m/%d/%Y")
-            time.sleep(0.6)
-            board = scoreboardv2.ScoreboardV2(game_date=date)
-            df = board.get_data_frames()[0]
-            if df.empty:
-                return []
-            games = []
-            for _, row in df.iterrows():
-                status = str(row.get("GAME_STATUS_TEXT", ""))
-                if "Final" in status:
-                    continue
-                home_id = int(row.get("HOME_TEAM_ID", 0))
-                away_id = int(row.get("VISITOR_TEAM_ID", 0))
-                home_name, home_city = TEAM_MAP.get(home_id, ("Unknown", ""))
-                away_name, away_city = TEAM_MAP.get(away_id, ("Unknown", ""))
-                games.append({
-                    "game_id": str(row.get("GAME_ID", "")),
-                    "home_team": home_name,
-                    "away_team": away_name,
-                    "home_city": home_city,
-                    "away_city": away_city,
-                    "status": status,
-                    "game_time": date,
-                })
-            return games
         except Exception:
             return []
 
