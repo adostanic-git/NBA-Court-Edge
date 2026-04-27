@@ -76,7 +76,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "https://nba-court-edge-seven.vercel.app"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://nba-court-edge-seven.vercel.app",
+        "https://nba-court-edge.vercel.app",
+        "https://nba-court-edge-p5lkjb3ol-andrejdostanic9-3939s-projects.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
